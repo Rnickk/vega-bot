@@ -1148,6 +1148,53 @@ async def on_message(message):
         # Si message vide après le nom, VEGA dit bonjour
         if not question:
             question = "Dis juste bonjour de façon naturelle et courte."
+
+        # Détection de demande de changement de contexte
+        q_lower = question.lower().strip()
+        context_keywords = {
+            "gaming": ["gaming", "jeux", "gamer", "jeu vidéo", "jeux vidéo"],
+            "esport": ["esport", "compétitif", "tournoi", "équipe esport"],
+            "gamedev": ["game dev", "développement jeu", "créer un jeu"],
+            "etudiant": ["étudiant", "etudiant", "études", "révision", "scolaire", "école", "université"],
+            "coding": ["coding", "code", "développeur", "programmation", "dev"],
+            "langues": ["langues", "apprendre une langue", "linguistique"],
+            "professionnel": ["professionnel", "entreprise", "business", "travail"],
+            "art": ["art", "dessin", "illustration", "design", "créatif"],
+            "musique": ["musique", "beatmaking", "production musicale", "dj"],
+            "ecriture": ["écriture", "roman", "écrire", "auteur", "littérature"],
+            "streaming": ["streaming", "stream", "twitch", "youtube", "créateur"],
+            "anime": ["anime", "manga", "otaku", "weeb"],
+            "cinema": ["cinéma", "films", "séries", "movie"],
+            "sport": ["sport", "fitness", "musculation", "gym"],
+            "cuisine": ["cuisine", "food", "recettes", "culinaire"],
+            "voyage": ["voyage", "travel", "backpacker", "tourisme"],
+            "crypto": ["crypto", "bitcoin", "trading", "finance", "investissement"],
+            "entrepreneuriat": ["startup", "entrepreneur", "business", "projet"],
+            "communaute": ["communauté", "général", "social", "amis"]
+        }
+
+        # Vérifier si c'est une demande de configuration de contexte
+        change_triggers = ["je veux un serveur", "transforme", "on est", "c'est un serveur", "notre serveur est", "configure en", "mets en mode", "serveur de"]
+        is_context_request = any(t in q_lower for t in change_triggers)
+
+        if is_context_request and message.guild:
+            detected_type = None
+            for server_type, keywords in context_keywords.items():
+                if any(kw in q_lower for kw in keywords):
+                    detected_type = server_type
+                    break
+
+            if detected_type and message.author.guild_permissions.administrator:
+                ctx = {**SERVER_TYPES[detected_type], "type": detected_type}
+                SERVER_CONTEXTS[message.guild.id] = ctx
+                suggestions = "\n".join([f"• {s}" for s in ctx.get("suggestions", [])])
+                reply = f"✅ Parfait ! J'ai configuré ce serveur en mode **{ctx['label']}**.\n\nJe vais maintenant adapter mon comportement à votre communauté. Voici ce que je peux faire pour vous :\n{suggestions}"
+                await message.channel.send(reply)
+                return
+            elif detected_type and not message.author.guild_permissions.administrator:
+                await message.channel.send("❌ Seul un administrateur peut changer le type du serveur !")
+                return
+
         if bot.user in message.mentions:
             question = question.replace(f"<@{bot.user.id}>", "").strip()
 
@@ -1166,6 +1213,10 @@ async def on_message(message):
                 CONVERSATION_HISTORY[user_id] = CONVERSATION_HISTORY[user_id][-20:]
 
             try:
+                # Charger le contexte du serveur
+                server_ctx = get_server_context(message.guild) if message.guild else SERVER_TYPES["communaute"]
+                server_personality = server_ctx.get("personality", "")
+                
                 # Charger la mémoire de l'utilisateur
                 user_memory = get_user_memory(user_id)
                 memory_context = ""
@@ -1177,7 +1228,7 @@ async def on_message(message):
                     memory_context += f"\nDernière conversation : {user_memory['derniere_conversation']}"
 
                 # Recherche web si nécessaire
-                system_with_context = VEGA_SYSTEM + memory_context
+                system_with_context = VEGA_SYSTEM + f"\n\nCONTEXTE DU SERVEUR : Ce serveur est de type {server_ctx.get('label', 'général')}. {server_personality} Adapte ton comportement, ton vocabulaire et tes suggestions à ce contexte." + memory_context
                 if needs_web_search(question):
                     web_result = await web_search(question)
                     if web_result:
@@ -1273,6 +1324,14 @@ async def on_message(message):
 
             except Exception as e:
                 await message.channel.send(f"Oups, j'ai eu un problème : `{e}`")
+
+    # Gérer les réponses au quiz
+    if not message.author.bot and not message.content.startswith("!"):
+        user_id = message.author.id
+        if user_id in study_sessions and study_sessions[user_id].get("quiz"):
+            handled = await handle_quiz_answer(message, user_id)
+            if handled:
+                return
 
     await bot.process_commands(message)
 
@@ -2255,6 +2314,521 @@ async def fetch_and_post_deals():
 @tasks.loop(hours=6)
 async def check_deals():
     await fetch_and_post_deals()
+
+
+
+# ═══════════════════════════════════════════
+#  DÉTECTION DU CONTEXTE DU SERVEUR
+# ═══════════════════════════════════════════
+
+SERVER_CONTEXTS = {}  # guild_id -> context info
+
+SERVER_TYPES = {
+    # Gaming & Esport
+    "gaming": {
+        "label": "🎮 Gaming",
+        "keywords": ["gaming", "game", "jeu", "jeux", "play", "gamer", "xbox", "playstation", "nintendo", "pc", "valorant", "minecraft", "fortnite", "lol", "league", "csgo", "fps", "rpg", "mmorpg"],
+        "color": 0x2ECC71,
+        "suggestions": ["Tournois", "Stats de jeu", "Bons plans jeux", "Recherche équipe", "Tier list"],
+        "personality": "Tu es passionné de gaming, tu parles le langage des gamers, tu connais les jeux populaires et tu aides la communauté à s'organiser."
+    },
+    "esport": {
+        "label": "🏆 Esport",
+        "keywords": ["esport", "esports", "compétitif", "competitive", "team", "équipe", "tournoi", "tournament", "pro", "ranked", "elo", "coaching", "scrim"],
+        "color": 0xE74C3C,
+        "suggestions": ["Organisation de tournois", "Recrutement", "Analyse de performances", "Planning d'entraînement"],
+        "personality": "Tu es expert en esport, tu parles de stratégies, de méta, de performances et tu aides les équipes à s'organiser."
+    },
+    "gamedev": {
+        "label": "🕹️ Game Dev",
+        "keywords": ["gamedev", "game dev", "unity", "unreal", "godot", "développement jeu", "indie", "pixel art", "shader", "blender"],
+        "color": 0x9B59B6,
+        "suggestions": ["Aide au développement", "Ressources", "Feedback sur projets", "Game jam"],
+        "personality": "Tu es expert en développement de jeux vidéo, tu connais les moteurs de jeu et tu aides les développeurs."
+    },
+    # Éducation
+    "etudiant": {
+        "label": "📚 Étudiant",
+        "keywords": ["étude", "etude", "révision", "revision", "cours", "examen", "bac", "brevet", "licence", "master", "université", "lycée", "collège", "devoir", "homework", "school", "student"],
+        "color": 0x3498DB,
+        "suggestions": ["Fiches de révision", "Quiz", "Plan de révision", "Correction de devoirs", "Explication de cours"],
+        "personality": "Tu es un assistant pédagogique bienveillant. Tu aides les étudiants à comprendre, mémoriser et progresser."
+    },
+    "coding": {
+        "label": "💻 Coding / Dev",
+        "keywords": ["code", "coding", "dev", "developer", "python", "javascript", "java", "html", "css", "github", "programmation", "programming", "bug", "api", "backend", "frontend"],
+        "color": 0x1ABC9C,
+        "suggestions": ["Aide au code", "Review de code", "Ressources dev", "Debug", "Projets collaboratifs"],
+        "personality": "Tu es un développeur expert. Tu aides à débugger, expliques les concepts de programmation et proposes des solutions élégantes."
+    },
+    "langues": {
+        "label": "🌍 Langues",
+        "keywords": ["langue", "language", "anglais", "english", "espagnol", "spanish", "japonais", "japanese", "traduction", "translation", "grammaire", "vocabulary", "vocabulaire"],
+        "color": 0xF39C12,
+        "suggestions": ["Traduction", "Correction grammaticale", "Vocabulaire", "Exercices de langue", "Conversation"],
+        "personality": "Tu es un professeur de langues polyglotte. Tu corriges, expliques et aides à progresser dans l'apprentissage des langues."
+    },
+    "professionnel": {
+        "label": "💼 Professionnel",
+        "keywords": ["pro", "professionnel", "entreprise", "business", "startup", "marketing", "rh", "management", "réunion", "meeting", "projet", "agile", "scrum"],
+        "color": 0x2C3E50,
+        "suggestions": ["Aide à la rédaction", "Organisation de réunions", "Résumés", "Brainstorming", "Gestion de projet"],
+        "personality": "Tu es un assistant professionnel efficace. Tu aides à la productivité, la communication et l'organisation."
+    },
+    # Créatif
+    "art": {
+        "label": "🎨 Art / Design",
+        "keywords": ["art", "dessin", "drawing", "illustration", "design", "graphisme", "photoshop", "illustrator", "figma", "créatif", "creative", "artwork", "fanart"],
+        "color": 0xE91E63,
+        "suggestions": ["Feedback sur créations", "Ressources artistiques", "Tutoriels", "Challenges créatifs", "Inspiration"],
+        "personality": "Tu es un passionné d'art et de design. Tu donnes des feedbacks constructifs et encourages la créativité."
+    },
+    "musique": {
+        "label": "🎵 Musique",
+        "keywords": ["musique", "music", "beatmaking", "production", "dj", "rap", "rock", "jazz", "piano", "guitare", "guitar", "fl studio", "ableton", "mix", "sample"],
+        "color": 0x8E44AD,
+        "suggestions": ["Partage de musique", "Feedback", "Théorie musicale", "Ressources", "Collaborations"],
+        "personality": "Tu es passionné de musique. Tu connais tous les genres, les techniques de production et tu aides les musiciens à progresser."
+    },
+    "ecriture": {
+        "label": "✍️ Écriture",
+        "keywords": ["écriture", "writing", "roman", "livre", "book", "poésie", "poetry", "fanfiction", "auteur", "author", "rédaction", "scénario", "script"],
+        "color": 0xD35400,
+        "suggestions": ["Feedback sur textes", "Correction", "Inspiration", "Développement de personnages", "World building"],
+        "personality": "Tu es un écrivain passionné. Tu aides à développer des histoires, corriges les textes et inspires la créativité littéraire."
+    },
+    # Streaming & Contenu
+    "streaming": {
+        "label": "🎥 Streaming",
+        "keywords": ["stream", "streaming", "twitch", "youtube", "content", "créateur", "creator", "live", "vod", "clip", "subscriber", "abonné"],
+        "color": 0x9B59B6,
+        "suggestions": ["Planning de streams", "Annonces", "Clips", "Interaction communauté", "Stats"],
+        "personality": "Tu es expert en streaming et création de contenu. Tu aides le créateur à gérer sa communauté et à grandir."
+    },
+    "anime": {
+        "label": "🌸 Anime / Manga",
+        "keywords": ["anime", "manga", "otaku", "weeb", "naruto", "one piece", "dragon ball", "attack on titan", "demon slayer", "jujutsu", "cosplay", "japan", "japonais"],
+        "color": 0xFF6B9D,
+        "suggestions": ["Recommandations anime", "Discussions", "Quiz anime", "Actualités", "Fanart"],
+        "personality": "Tu es un otaku passionné. Tu connais des centaines d'animes et mangas et tu aides la communauté à découvrir de nouvelles œuvres."
+    },
+    "cinema": {
+        "label": "🎬 Cinéma / Séries",
+        "keywords": ["film", "movie", "série", "series", "netflix", "cinema", "acteur", "réalisateur", "marvel", "dc", "disney", "horreur", "action", "thriller"],
+        "color": 0xC0392B,
+        "suggestions": ["Recommandations", "Critiques", "Quiz cinéma", "Soirées film", "Actualités"],
+        "personality": "Tu es un cinéphile passionné. Tu connais le cinéma mondial et tu aides la communauté à découvrir des films et séries."
+    },
+    # Lifestyle
+    "sport": {
+        "label": "🏋️ Sport / Fitness",
+        "keywords": ["sport", "fitness", "musculation", "gym", "football", "basketball", "running", "yoga", "nutrition", "workout", "entraînement", "coach"],
+        "color": 0x27AE60,
+        "suggestions": ["Programmes d'entraînement", "Nutrition", "Motivation", "Challenges", "Suivi de progression"],
+        "personality": "Tu es un coach sportif motivant. Tu donnes des conseils d'entraînement, de nutrition et tu motives la communauté."
+    },
+    "cuisine": {
+        "label": "🍳 Cuisine",
+        "keywords": ["cuisine", "food", "recette", "recipe", "cooking", "chef", "restaurant", "gastronomie", "pâtisserie", "boulangerie", "vegan", "végétarien"],
+        "color": 0xE67E22,
+        "suggestions": ["Recettes", "Conseils culinaires", "Idées de repas", "Techniques de cuisine", "Partage de photos"],
+        "personality": "Tu es un chef passionné. Tu partages des recettes, des techniques culinaires et inspires la communauté en cuisine."
+    },
+    "voyage": {
+        "label": "✈️ Voyage",
+        "keywords": ["voyage", "travel", "backpacker", "tourisme", "destination", "hotel", "visa", "passeport", "aventure", "roadtrip", "vanlife"],
+        "color": 0x16A085,
+        "suggestions": ["Destinations", "Conseils de voyage", "Itinéraires", "Bons plans", "Partage d'expériences"],
+        "personality": "Tu es un voyageur passionné. Tu connais les meilleures destinations et tu aides la communauté à planifier leurs aventures."
+    },
+    # Finance
+    "crypto": {
+        "label": "💰 Crypto / Finance",
+        "keywords": ["crypto", "bitcoin", "ethereum", "nft", "defi", "trading", "invest", "finance", "bourse", "action", "wallet", "blockchain", "web3"],
+        "color": 0xF1C40F,
+        "suggestions": ["Actualités crypto", "Analyse de marché", "Éducation financière", "Alertes prix", "Discussions"],
+        "personality": "Tu es expert en crypto et finance. Tu expliques les concepts, analyses les marchés et aides la communauté à comprendre l'écosystème."
+    },
+    "entrepreneuriat": {
+        "label": "🚀 Entrepreneuriat",
+        "keywords": ["startup", "entrepreneur", "business", "projet", "idée", "investisseur", "pitch", "lean", "mvp", "croissance", "growth", "saas"],
+        "color": 0x2980B9,
+        "suggestions": ["Feedback sur projets", "Conseils business", "Networking", "Ressources", "Pitches"],
+        "personality": "Tu es un mentor entrepreneurial. Tu aides les entrepreneurs à développer leurs projets et à surmonter les obstacles."
+    },
+    # Général
+    "communaute": {
+        "label": "👥 Communauté",
+        "keywords": ["communauté", "community", "général", "general", "social", "amis", "friends", "discussion", "chat"],
+        "color": 0x00D4FF,
+        "suggestions": ["Discussions générales", "Événements", "Sondages", "Présentations", "Bonne humeur"],
+        "personality": "Tu es un assistant communautaire chaleureux. Tu animes les discussions, organises des événements et crées de la cohésion."
+    }
+}
+
+def detect_server_type(guild) -> dict:
+    """Analyse le serveur et détecte son type."""
+    # Collecter tous les textes du serveur
+    texts = []
+    texts.append(guild.name.lower())
+    
+    for channel in guild.channels:
+        texts.append(channel.name.lower())
+    
+    for role in guild.roles:
+        texts.append(role.name.lower())
+    
+    all_text = " ".join(texts)
+    
+    # Scorer chaque type
+    scores = {}
+    for server_type, data in SERVER_TYPES.items():
+        score = 0
+        for keyword in data["keywords"]:
+            if keyword in all_text:
+                score += 1
+        if score > 0:
+            scores[server_type] = score
+    
+    if not scores:
+        return SERVER_TYPES["communaute"]
+    
+    best_type = max(scores, key=scores.get)
+    return {**SERVER_TYPES[best_type], "type": best_type, "score": scores[best_type]}
+
+def get_server_context(guild) -> dict:
+    """Récupère ou détecte le contexte du serveur."""
+    guild_id = guild.id
+    if guild_id not in SERVER_CONTEXTS:
+        SERVER_CONTEXTS[guild_id] = detect_server_type(guild)
+    return SERVER_CONTEXTS[guild_id]
+
+@bot.tree.command(name="context", description="Affiche le type de serveur détecté par VEGA")
+async def context(interaction: discord.Interaction):
+    ctx = get_server_context(interaction.guild)
+    embed = discord.Embed(
+        title=f"🔍 Contexte détecté — {ctx['label']}",
+        color=ctx.get("color", VEGA_COLOR)
+    )
+    embed.add_field(
+        name="💡 Suggestions adaptées",
+        value="\n".join([f"• {s}" for s in ctx.get("suggestions", [])]),
+        inline=False
+    )
+    embed.add_field(
+        name="🎯 Comment changer",
+        value="Utilise `/set-context` pour définir manuellement le type de ton serveur.",
+        inline=False
+    )
+    embed.set_footer(text=f"VEGA v1.0 • Détection automatique")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="set-context", description="Définit manuellement le type de serveur")
+@app_commands.describe(type_serveur="Le type de ton serveur")
+@app_commands.choices(type_serveur=[
+    app_commands.Choice(name="🎮 Gaming", value="gaming"),
+    app_commands.Choice(name="🏆 Esport", value="esport"),
+    app_commands.Choice(name="🕹️ Game Dev", value="gamedev"),
+    app_commands.Choice(name="📚 Étudiant", value="etudiant"),
+    app_commands.Choice(name="💻 Coding / Dev", value="coding"),
+    app_commands.Choice(name="🌍 Langues", value="langues"),
+    app_commands.Choice(name="💼 Professionnel", value="professionnel"),
+    app_commands.Choice(name="🎨 Art / Design", value="art"),
+    app_commands.Choice(name="🎵 Musique", value="musique"),
+    app_commands.Choice(name="✍️ Écriture", value="ecriture"),
+    app_commands.Choice(name="🎥 Streaming", value="streaming"),
+    app_commands.Choice(name="🌸 Anime / Manga", value="anime"),
+    app_commands.Choice(name="🎬 Cinéma / Séries", value="cinema"),
+    app_commands.Choice(name="🏋️ Sport / Fitness", value="sport"),
+    app_commands.Choice(name="🍳 Cuisine", value="cuisine"),
+    app_commands.Choice(name="✈️ Voyage", value="voyage"),
+    app_commands.Choice(name="💰 Crypto / Finance", value="crypto"),
+    app_commands.Choice(name="🚀 Entrepreneuriat", value="entrepreneuriat"),
+    app_commands.Choice(name="👥 Communauté générale", value="communaute"),
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def set_context(interaction: discord.Interaction, type_serveur: str):
+    ctx = {**SERVER_TYPES[type_serveur], "type": type_serveur}
+    SERVER_CONTEXTS[interaction.guild.id] = ctx
+    
+    embed = discord.Embed(
+        title=f"✅ Contexte mis à jour — {ctx['label']}",
+        description=f"VEGA va maintenant adapter son comportement à votre serveur **{ctx['label']}**.",
+        color=ctx.get("color", VEGA_COLOR)
+    )
+    embed.add_field(
+        name="💡 Fonctionnalités adaptées",
+        value="\n".join([f"• {s}" for s in ctx.get("suggestions", [])]),
+        inline=False
+    )
+    await interaction.response.send_message(embed=embed)
+
+# ═══════════════════════════════════════════
+#  PACK ÉTUDIANT — VEGA PROFESSEUR
+# ═══════════════════════════════════════════
+
+# Stockage des sessions d'étude par utilisateur
+study_sessions = {}  # user_id -> {cours, fiches, quiz, score}
+
+async def call_vega_ai(prompt: str, max_tokens: int = 2000) -> str:
+    """Appel direct à l'IA pour les fonctions étudiantes."""
+    try:
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": "Tu es un professeur expert et pédagogue. Tu réponds toujours en français. Tu es précis, clair et structuré."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.7
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {GROQ_API_KEY}"},
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                data = await resp.json()
+        if "choices" in data and data["choices"]:
+            return data["choices"][0]["message"]["content"]
+        return "Erreur lors de la génération."
+    except Exception as e:
+        return f"Erreur : {e}"
+
+@bot.tree.command(name="fiche", description="Génère une fiche de révision à partir d'un cours")
+@app_commands.describe(cours="Colle ton cours ou le sujet à réviser")
+async def fiche(interaction: discord.Interaction, cours: str):
+    await interaction.response.defer()
+    prompt = f"""Génère une fiche de révision complète et bien structurée pour ce cours :
+
+{cours}
+
+La fiche doit contenir :
+1. 📌 Points clés (les notions essentielles à retenir)
+2. 📖 Définitions importantes
+3. 🔑 À retenir absolument (les 3-5 choses les plus importantes)
+4. 💡 Astuces pour mémoriser
+
+Sois concis mais complet. Utilise des emojis pour structurer."""
+
+    fiche_text = await call_vega_ai(prompt, 1500)
+    
+    # Stocker pour les quiz
+    user_id = interaction.user.id
+    study_sessions[user_id] = {"cours": cours, "fiche": fiche_text, "quiz_score": 0}
+    
+    # Découper si trop long pour Discord
+    if len(fiche_text) > 1900:
+        parts = [fiche_text[i:i+1900] for i in range(0, len(fiche_text), 1900)]
+        await interaction.followup.send(f"📚 **Fiche de révision** — {interaction.user.display_name}")
+        for part in parts:
+            await interaction.channel.send(part)
+        await interaction.channel.send("✅ Tape `/quiz` pour tester tes connaissances sur ce cours !")
+    else:
+        await interaction.followup.send(f"📚 **Fiche de révision** — {interaction.user.display_name}\n\n{fiche_text}\n\n✅ Tape `/quiz` pour tester tes connaissances !")
+
+@bot.tree.command(name="resume", description="Résume un texte long en points essentiels")
+@app_commands.describe(texte="Le texte à résumer")
+async def resume(interaction: discord.Interaction, texte: str):
+    await interaction.response.defer()
+    prompt = f"""Résume ce texte en points essentiels clairs et concis, en français :
+
+{texte}
+
+Format :
+- Points essentiels numérotés
+- Maximum 8 points
+- Chaque point en 1-2 phrases maximum
+- Commence par les infos les plus importantes"""
+
+    result = await call_vega_ai(prompt, 800)
+    await interaction.followup.send(f"📝 **Résumé** — {interaction.user.display_name}\n\n{result}")
+
+@bot.tree.command(name="quiz", description="Lance un quiz sur ton dernier cours envoyé via /fiche")
+async def quiz(interaction: discord.Interaction):
+    await interaction.response.defer()
+    user_id = interaction.user.id
+    
+    if user_id not in study_sessions or "cours" not in study_sessions[user_id]:
+        await interaction.followup.send("❌ Tu n'as pas encore de cours chargé ! Utilise `/fiche` d'abord.")
+        return
+    
+    cours = study_sessions[user_id]["cours"]
+    prompt = f"""Génère 5 questions de QCM (choix multiples) sur ce cours :
+
+{cours[:2000]}
+
+Format STRICT (respecte exactement ce format) :
+Q1: [question]
+A) [réponse]
+B) [réponse]
+C) [réponse]
+D) [réponse]
+BONNE_REPONSE: [A/B/C/D]
+
+Q2: ...etc
+
+Génère exactement 5 questions variées et pertinentes."""
+
+    quiz_text = await call_vega_ai(prompt, 1500)
+    
+    # Parser les questions
+    questions = []
+    current_q = {}
+    for line in quiz_text.split("\n"):
+        line = line.strip()
+        if line.startswith("Q") and ":" in line and len(line) < 200:
+            if current_q.get("question"):
+                questions.append(current_q)
+            current_q = {"question": line.split(":", 1)[1].strip(), "options": [], "answer": ""}
+        elif line.startswith(("A)", "B)", "C)", "D)")):
+            current_q.setdefault("options", []).append(line)
+        elif line.startswith("BONNE_REPONSE:"):
+            current_q["answer"] = line.replace("BONNE_REPONSE:", "").strip()
+    if current_q.get("question"):
+        questions.append(current_q)
+    
+    if not questions:
+        await interaction.followup.send(f"📝 **Quiz généré :**\n\n{quiz_text}")
+        return
+    
+    # Stocker le quiz
+    study_sessions[user_id]["quiz"] = questions
+    study_sessions[user_id]["quiz_index"] = 0
+    study_sessions[user_id]["quiz_score"] = 0
+    
+    # Afficher la première question
+    q = questions[0]
+    msg = f"🎯 **Quiz — Question 1/{len(questions)}**\n\n**{q['question']}**\n\n"
+    msg += "\n".join(q.get("options", []))
+    msg += "\n\nRéponds avec la lettre : **A**, **B**, **C** ou **D**"
+    
+    await interaction.followup.send(msg)
+
+@bot.tree.command(name="plan-revision", description="Génère un plan de révision personnalisé")
+@app_commands.describe(
+    matiere="La matière à réviser",
+    jours="Combien de jours tu as pour réviser",
+    niveau="Ton niveau actuel (débutant/intermédiaire/avancé)"
+)
+async def plan_revision(interaction: discord.Interaction, matiere: str, jours: int, niveau: str = "intermédiaire"):
+    await interaction.response.defer()
+    prompt = f"""Génère un plan de révision détaillé et réaliste pour :
+- Matière : {matiere}
+- Temps disponible : {jours} jours
+- Niveau actuel : {niveau}
+
+Le plan doit inclure :
+📅 Planning jour par jour
+⏱️ Temps suggéré par session (méthode Pomodoro)
+📚 Ce qu'il faut réviser chaque jour
+🎯 Objectifs concrets pour chaque session
+💡 Conseils de mémorisation adaptés à la matière
+✅ Comment savoir si tu es prêt
+
+Sois réaliste et motivant !"""
+
+    result = await call_vega_ai(prompt, 1500)
+    
+    if len(result) > 1900:
+        parts = [result[i:i+1900] for i in range(0, len(result), 1900)]
+        await interaction.followup.send(f"📅 **Plan de révision — {matiere}** ({jours} jours)")
+        for part in parts:
+            await interaction.channel.send(part)
+    else:
+        await interaction.followup.send(f"📅 **Plan de révision — {matiere}** ({jours} jours)\n\n{result}")
+
+@bot.tree.command(name="explique", description="VEGA explique un concept de façon simple")
+@app_commands.describe(
+    concept="Le concept à expliquer",
+    niveau="Pour quel niveau (lycée/université/débutant/expert)"
+)
+async def explique(interaction: discord.Interaction, concept: str, niveau: str = "lycée"):
+    await interaction.response.defer()
+    prompt = f"""Explique "{concept}" de façon claire et simple pour un niveau {niveau}.
+
+Utilise :
+- Des analogies et exemples concrets du quotidien
+- Une progression logique du simple au complexe
+- Des emojis pour illustrer
+- Maximum 300 mots
+- Termine par "En résumé :" avec 1-2 phrases clés"""
+
+    result = await call_vega_ai(prompt, 600)
+    await interaction.followup.send(f"💡 **{concept}** — Niveau {niveau}\n\n{result}")
+
+@bot.tree.command(name="corrige", description="VEGA corrige ton texte ou ta rédaction")
+@app_commands.describe(texte="Ton texte à corriger")
+async def corrige(interaction: discord.Interaction, texte: str):
+    await interaction.response.defer()
+    prompt = f"""Corrige ce texte et améliore-le :
+
+{texte}
+
+Donne :
+1. ✅ Version corrigée
+2. 📝 Liste des erreurs trouvées (orthographe, grammaire, style)
+3. 💡 Suggestions d'amélioration
+
+Sois bienveillant et pédagogue."""
+
+    result = await call_vega_ai(prompt, 1000)
+    
+    if len(result) > 1900:
+        parts = [result[i:i+1900] for i in range(0, len(result), 1900)]
+        await interaction.followup.send(f"✏️ **Correction** — {interaction.user.display_name}")
+        for part in parts:
+            await interaction.channel.send(part)
+    else:
+        await interaction.followup.send(f"✏️ **Correction** — {interaction.user.display_name}\n\n{result}")
+
+# Gérer les réponses au quiz via on_message
+async def handle_quiz_answer(message, user_id):
+    """Gère les réponses au quiz en cours."""
+    session = study_sessions.get(user_id, {})
+    quiz = session.get("quiz", [])
+    idx = session.get("quiz_index", 0)
+    
+    if not quiz or idx >= len(quiz):
+        return False
+    
+    answer = message.content.strip().upper()
+    if answer not in ["A", "B", "C", "D"]:
+        return False
+    
+    q = quiz[idx]
+    correct = q.get("answer", "").upper().strip()
+    
+    if answer == correct:
+        study_sessions[user_id]["quiz_score"] = session.get("quiz_score", 0) + 1
+        response = f"✅ **Bonne réponse !**"
+    else:
+        response = f"❌ **Mauvaise réponse.** La bonne réponse était **{correct}**."
+    
+    study_sessions[user_id]["quiz_index"] = idx + 1
+    next_idx = idx + 1
+    
+    if next_idx >= len(quiz):
+        score = study_sessions[user_id]["quiz_score"]
+        total = len(quiz)
+        pct = (score / total) * 100
+        emoji = "🏆" if pct >= 80 else "📈" if pct >= 60 else "📚"
+        response += f"\n\n{emoji} **Quiz terminé !** Score : **{score}/{total}** ({pct:.0f}%)"
+        if pct < 60:
+            response += "\n💡 Tu devrais revoir ta fiche avec `/fiche` !"
+        elif pct >= 80:
+            response += "\n🎉 Excellent travail, tu maîtrises le sujet !"
+        await message.channel.send(response)
+        study_sessions[user_id]["quiz"] = []
+    else:
+        next_q = quiz[next_idx]
+        msg = f"{response}\n\n🎯 **Question {next_idx + 1}/{len(quiz)}**\n\n**{next_q['question']}**\n\n"
+        msg += "\n".join(next_q.get("options", []))
+        msg += "\n\nRéponds avec : **A**, **B**, **C** ou **D**"
+        await message.channel.send(msg)
+    
+    return True
 
 # ═══════════════════════════════════════════
 #  LANCEMENT
