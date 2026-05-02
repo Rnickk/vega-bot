@@ -37,7 +37,7 @@ COMMANDES SLASH :
   /qr            → Générer un QR code
 
 COMMANDES TEXTE (préfixe !) :
-  !jarvis [question] → Parler à JARVIS (IA conversationnelle)
+  !vega [question] → Parler à JARVIS (IA conversationnelle)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -56,8 +56,23 @@ import pytz
 from discord.ext import tasks
 import random
 import os
+import logging
+import sqlite3
+import signal
+import sys
 from dotenv import load_dotenv
 load_dotenv()
+
+# ── Logging propre ──────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("vega.log", encoding="utf-8")
+    ]
+)
+logger = logging.getLogger("VEGA")
 
 # ═══════════════════════════════════════════
 #  CONFIGURATION
@@ -68,6 +83,18 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 PREFIX = "!"
 VEGA_COLOR = 0x00D4FF   # Bleu VEGA
+
+# ── Validation des variables d'environnement ─
+def validate_env():
+    missing = []
+    if not TOKEN: missing.append("TOKEN")
+    if not GROQ_API_KEY: missing.append("GROQ_API_KEY")
+    if not SERPAPI_KEY: missing.append("SERPAPI_KEY")
+    if missing:
+        logger.critical(f"Variables manquantes dans .env : {missing}")
+        logger.critical("Ajoutez-les dans votre fichier .env et relancez VEGA.")
+        sys.exit(1)
+    logger.info("✅ Variables d'environnement validées.")
 VEGA_VERSION = "2.0"
 
 # ═══════════════════════════════════════════
@@ -101,6 +128,77 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+
+# ── Cooldowns anti-spam ─────────────────────
+from collections import defaultdict
+import time
+
+cooldowns = defaultdict(dict)  # {user_id: {command: last_used}}
+COOLDOWN_TIMES = {
+    "ia": 3,        # 3s entre chaque message IA
+    "web": 5,       # 5s entre chaque recherche web
+    "meteo": 10,    # 10s entre chaque météo
+    "lourde": 30,   # 30s pour commandes lourdes
+}
+
+def check_cooldown(user_id: int, command: str) -> float:
+    """Retourne 0 si OK, sinon le nombre de secondes restantes."""
+    now = time.time()
+    last = cooldowns[user_id].get(command, 0)
+    wait = COOLDOWN_TIMES.get(command, 3)
+    remaining = wait - (now - last)
+    if remaining > 0:
+        return remaining
+    cooldowns[user_id][command] = now
+    return 0
+
+def split_message(text: str, max_len: int = 1990) -> list:
+    """Découpe un message en morceaux sans couper au milieu d'un mot."""
+    if len(text) <= max_len:
+        return [text]
+    parts = []
+    while text:
+        if len(text) <= max_len:
+            parts.append(text)
+            break
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = text.rfind(" ", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        parts.append(text[:split_at])
+        text = text[split_at:].lstrip()
+    return parts
+
+async def send_long_message(channel, text: str, prefix: str = ""):
+    """Envoie un message long en le découpant proprement."""
+    parts = split_message(text)
+    for i, part in enumerate(parts):
+        msg = (prefix + "\n\n" + part) if (i == 0 and prefix) else part
+        await channel.send(msg)
+
+# ── Gestionnaire d'erreurs global ───────────
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ Tu n'as pas les permissions nécessaires pour cette commande."
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        msg = "❌ Je n'ai pas les permissions nécessaires. Vérifie mon rôle sur le serveur."
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"⏳ Attends encore {error.retry_after:.1f}s avant de réutiliser cette commande."
+    elif isinstance(error, app_commands.CheckFailure):
+        msg = "❌ Tu ne peux pas utiliser cette commande ici."
+    else:
+        logger.error(f"Erreur commande slash: {error}")
+        msg = f"❌ Une erreur est survenue : `{type(error).__name__}`"
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Impossible d'envoyer l'erreur: {e}")
 
 @bot.event
 async def on_ready():
@@ -171,7 +269,7 @@ async def aide(interaction: discord.Interaction):
         "`/reset` — Annuler le setup en cours"
     ), inline=False)
     embed.add_field(name="💬 IA Conversationnelle", value=(
-        "`!jarvis [question]` — Posez n'importe quelle question à JARVIS"
+        "`!vega [question]` — Posez n'importe quelle question à JARVIS"
     ), inline=False)
     embed.set_thumbnail(url=bot.user.display_avatar.url)
     embed.set_footer(text=f"VEGA v{VEGA_VERSION} • {len(bot.tree.get_commands())} commandes disponibles")
@@ -254,8 +352,8 @@ async def heure(interaction: discord.Interaction, lieu: str):
         try:
             pytz.timezone(lieu)
             tz_name = lieu
-        except:
-            pass
+        except Exception as _e:
+            logger.warning(f"Erreur ignorée : {_e}")
 
     if not tz_name:
         embed = vega_embed(
@@ -459,19 +557,83 @@ SAFE_MATH = {
     "pow": pow, "factorial": math.factorial,
 }
 
+def safe_eval_expr(expression: str):
+    """Évalue une expression mathématique de façon sécurisée sans eval()."""
+    import ast as _ast
+
+    # Nettoyage
+    expr = expression.replace("^", "**").replace("×", "*").replace("÷", "/").strip()
+
+    # Longueur max pour éviter les DoS
+    if len(expr) > 200:
+        raise ValueError("Expression trop longue.")
+
+    # Parser AST pour éviter tout code malveillant
+    allowed_nodes = (
+        _ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Call,
+        _ast.Constant, _ast.Name,
+        _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.Pow,
+        _ast.Mod, _ast.FloorDiv, _ast.USub, _ast.UAdd
+    )
+
+    tree = _ast.parse(expr, mode="eval")
+
+    for node in _ast.walk(tree):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"Opération non autorisée : {type(node).__name__}")
+        if isinstance(node, _ast.Call):
+            if not isinstance(node.func, _ast.Name):
+                raise ValueError("Appel de fonction non autorisé.")
+            if node.func.id not in SAFE_MATH:
+                raise ValueError(f"Fonction inconnue : {node.func.id}")
+        if isinstance(node, _ast.Name):
+            if node.id not in SAFE_MATH:
+                raise ValueError(f"Variable inconnue : {node.id}")
+
+    # Évaluation sécurisée
+    def eval_node(node):
+        if isinstance(node, _ast.Expression):
+            return eval_node(node.body)
+        elif isinstance(node, _ast.Constant):
+            return node.value
+        elif isinstance(node, _ast.Name):
+            return SAFE_MATH[node.id]
+        elif isinstance(node, _ast.BinOp):
+            left = eval_node(node.left)
+            right = eval_node(node.right)
+            # Protection contre les calculs trop lourds
+            if isinstance(node.op, _ast.Pow):
+                if abs(right) > 1000:
+                    raise ValueError("Exposant trop grand (max 1000).")
+            ops = {
+                _ast.Add: lambda a, b: a + b,
+                _ast.Sub: lambda a, b: a - b,
+                _ast.Mult: lambda a, b: a * b,
+                _ast.Div: lambda a, b: a / b,
+                _ast.Pow: lambda a, b: a ** b,
+                _ast.Mod: lambda a, b: a % b,
+                _ast.FloorDiv: lambda a, b: a // b,
+            }
+            return ops[type(node.op)](left, right)
+        elif isinstance(node, _ast.UnaryOp):
+            operand = eval_node(node.operand)
+            if isinstance(node.op, _ast.USub):
+                return -operand
+            return operand
+        elif isinstance(node, _ast.Call):
+            func = SAFE_MATH[node.func.id]
+            args = [eval_node(a) for a in node.args]
+            return func(*args)
+        else:
+            raise ValueError("Nœud non supporté.")
+
+    return eval_node(tree)
+
 @bot.tree.command(name="calcul", description="Calculatrice avancée (supporte sin, cos, sqrt, log...)")
 @app_commands.describe(expression="Expression mathématique (ex: sqrt(144), sin(pi/2), 2**10)")
 async def calcul(interaction: discord.Interaction, expression: str):
     try:
-        # Nettoyage et sécurité
-        expr_clean = expression.replace("^", "**").replace("×", "*").replace("÷", "/")
-        # Bloque les imports et fonctions dangereuses
-        forbidden = ["import", "exec", "eval", "open", "os", "__", "subprocess"]
-        for f in forbidden:
-            if f in expr_clean.lower():
-                raise ValueError("Expression non autorisée.")
-
-        result = eval(expr_clean, {"__builtins__": {}}, SAFE_MATH)
+        result = safe_eval_expr(expression)
 
         if isinstance(result, float):
             if result == int(result) and abs(result) < 1e15:
@@ -494,9 +656,15 @@ async def calcul(interaction: discord.Interaction, expression: str):
             embed=vega_embed("Calculatrice — Erreur", "❌ Division par zéro impossible.", color=0xE74C3C),
             ephemeral=True
         )
-    except Exception as e:
+    except ValueError as e:
         await interaction.response.send_message(
-            embed=vega_embed("Calculatrice — Erreur", f"❌ Expression invalide : `{expression}`\n\nExemples : `sqrt(144)`, `2**10`, `sin(pi/2)`, `log(100)`", color=0xE74C3C),
+            embed=vega_embed("Calculatrice — Erreur", f"❌ {e}\n\nExemples : `sqrt(144)`, `2**10`, `sin(pi/2)`", color=0xE74C3C),
+            ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"Erreur calcul: {e}")
+        await interaction.response.send_message(
+            embed=vega_embed("Calculatrice — Erreur", "❌ Expression invalide.", color=0xE74C3C),
             ephemeral=True
         )
 
@@ -749,7 +917,7 @@ async def qr(interaction: discord.Interaction, contenu: str):
     await interaction.response.send_message(embed=embed)
 
 # ═══════════════════════════════════════════
-#  !jarvis — IA Conversationnelle
+#  !vega — IA Conversationnelle
 # ═══════════════════════════════════════════
 
 # ═══════════════════════════════════════════
@@ -774,8 +942,8 @@ def save_memory(memory: dict):
     try:
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(memory, f, ensure_ascii=False, indent=2)
-    except:
-        pass
+    except Exception as _e:
+        logger.warning(f"Erreur ignorée : {_e}")
 
 def get_user_memory(user_id: int) -> dict:
     """Récupère la mémoire d'un utilisateur."""
@@ -837,12 +1005,12 @@ ACTIONS DISCORD (réponds UNIQUEMENT avec le JSON si action demandée) :
 
 Sinon, réponds normalement en français."""
 
-@bot.command(name="jarvis")
+@bot.command(name="vega")
 async def jarvis_chat(ctx, *, question: str = None):
     if not question:
         embed = vega_embed(
             "VEGA",
-            "Oui ? Posez votre question. Exemple : `!jarvis Quelle est la capitale de l'Australie ?`"
+            "Oui ? Posez votre question. Exemple : `!vega Quelle est la capitale de l'Australie ?`"
         )
         await ctx.send(embed=embed)
         return
@@ -1052,7 +1220,7 @@ NO_SEARCH_PATTERNS = [
     "merci", "ok", "okay", "d'accord", "ouais", "oui", "non",
     "haha", "lol", "mdr", "xd", "c'est cool", "sympa",
     "mets le rôle", "retire le rôle", "sauvegarde", "souviens-toi",
-    "!jarvis", "tu es qui", "tu t'appelles"
+    "!vega", "tu es qui", "tu t'appelles"
 ]
 
 async def web_search(query: str) -> str:
@@ -1105,8 +1273,8 @@ async def web_search(query: str) -> str:
             abstract = data.get("AbstractText", "")
             if abstract:
                 return abstract[:400]
-        except:
-            pass
+        except Exception as _e:
+            logger.warning(f"Erreur ignorée : {_e}")
         return ""
 
 def needs_web_search(question: str) -> bool:
@@ -1138,7 +1306,7 @@ async def on_message(message):
     jarvis_triggers = ["vega", "hey vega", "ey vega", "vega,", "vega!", "jarvis", "hey jarvis"]
     triggered = any(content_lower.startswith(t) for t in jarvis_triggers) or bot.user in message.mentions
 
-    if triggered and not content_lower.startswith("!jarvis"):
+    if triggered and not content_lower.startswith("!vega"):
         # Extraire la question
         question = message.content
         for trigger in ["vega,", "vega!", "hey vega", "ey vega", "vega", "jarvis,", "jarvis!", "hey jarvis", "ey jarvis", "jarvis"]:
@@ -1201,6 +1369,12 @@ async def on_message(message):
         if not question:
             await message.channel.send(f"Oui {message.author.display_name} ? 👋")
             await bot.process_commands(message)
+            return
+
+        # Cooldown anti-spam IA
+        remaining = check_cooldown(message.author.id, "ia")
+        if remaining > 0:
+            await message.channel.send(f"⏳ Attends encore {remaining:.1f}s avant de me reparler !")
             return
 
         # Appeler l'IA
@@ -2221,8 +2395,8 @@ async def check_rockstar():
                     )
                     embed.set_footer(text="VEGA • Surveillance Rockstar Games")
                     await channel.send("@everyone", embed=embed)
-    except:
-        pass
+    except Exception as _e:
+        logger.warning(f"Erreur ignorée : {_e}")
 
 # ═══════════════════════════════════════════
 #  BONS PLANS JEUX VIDÉO
@@ -2830,7 +3004,67 @@ async def handle_quiz_answer(message, user_id):
     
     return True
 
+
+# ═══════════════════════════════════════════
+#  /status — Santé du bot
+# ═══════════════════════════════════════════
+
+@bot.tree.command(name="status", description="Vérifie que tous les systèmes de VEGA fonctionnent")
+async def status(interaction: discord.Interaction):
+    await interaction.response.defer()
+    results = {}
+
+    # Test Groq
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5},
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
+                results["🤖 IA (Groq)"] = "✅ En ligne" if resp.status == 200 else f"❌ Erreur {resp.status}"
+    except Exception as e:
+        results["🤖 IA (Groq)"] = f"❌ {type(e).__name__}"
+
+    # Test SerpAPI
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://serpapi.com/search.json?q=test&api_key={SERPAPI_KEY}&num=1",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
+                results["🌐 Recherche web"] = "✅ En ligne" if resp.status == 200 else f"❌ Erreur {resp.status}"
+    except Exception as e:
+        results["🌐 Recherche web"] = f"❌ {type(e).__name__}"
+
+    # Test météo
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://wttr.in/Paris?format=j1", timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                results["🌤️ Météo"] = "✅ En ligne" if resp.status == 200 else f"❌ Erreur {resp.status}"
+    except Exception as e:
+        results["🌤️ Météo"] = f"❌ {type(e).__name__}"
+
+    # Mémoire
+    try:
+        mem = load_memory()
+        results["🧠 Mémoire"] = f"✅ {len(mem)} utilisateurs en mémoire"
+    except Exception as e:
+        results["🧠 Mémoire"] = f"❌ {e}"
+
+    # Discord
+    results["💬 Discord"] = f"✅ {len(bot.guilds)} serveurs connectés"
+
+    embed = discord.Embed(title="⚡ VEGA — Status des systèmes", color=VEGA_COLOR)
+    for name, val in results.items():
+        embed.add_field(name=name, value=val, inline=False)
+    embed.set_footer(text=f"VEGA v{VEGA_VERSION} • {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    await interaction.followup.send(embed=embed)
+
 # ═══════════════════════════════════════════
 #  LANCEMENT
 # ═══════════════════════════════════════════
-bot.run(TOKEN)
+validate_env()
+logger.info("🚀 Démarrage de VEGA...")
+bot.run(TOKEN, log_handler=None)
