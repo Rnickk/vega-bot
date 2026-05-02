@@ -1,3 +1,6 @@
 discord.py
 groq
 google-search-results
+aiohttp
+pytz
+python-dotenv
