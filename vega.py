@@ -17,7 +17,7 @@ INSTALLATION :
 CONFIGURATION :
   1. Remplace TON_TOKEN_ICI par ton token Discord
   2. Active : Message Content Intent + Server Members Intent
-  3. Lance : python jarvis.py
+  3. Lance : python vega.py
 
 COMMANDES SLASH :
   /aide          → Toutes les commandes
@@ -37,7 +37,7 @@ COMMANDES SLASH :
   /qr            → Générer un QR code
 
 COMMANDES TEXTE (préfixe !) :
-  !vega [question] → Parler à JARVIS (IA conversationnelle)
+  !vega [question] → Parler à VEGA (IA conversationnelle)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -239,7 +239,7 @@ def vega_embed(title: str, description: str = "", color=None, footer: str = None
 #  /aide
 # ═══════════════════════════════════════════
 
-@bot.tree.command(name="aide", description="Affiche toutes les commandes JARVIS")
+@bot.tree.command(name="aide", description="Affiche toutes les commandes VEGA")
 async def aide(interaction: discord.Interaction):
     embed = discord.Embed(
         title="⚡ VEGA — Manuel de bord",
@@ -269,7 +269,7 @@ async def aide(interaction: discord.Interaction):
         "`/reset` — Annuler le setup en cours"
     ), inline=False)
     embed.add_field(name="💬 IA Conversationnelle", value=(
-        "`!vega [question]` — Posez n'importe quelle question à JARVIS"
+        "`!vega [question]` — Posez n'importe quelle question à VEGA"
     ), inline=False)
     embed.set_thumbnail(url=bot.user.display_avatar.url)
     embed.set_footer(text=f"VEGA v{VEGA_VERSION} • {len(bot.tree.get_commands())} commandes disponibles")
@@ -487,7 +487,7 @@ async def cherche(interaction: discord.Interaction, requete: str):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8),
-                                   headers={"User-Agent": "JARVISBot/1.0"}) as resp:
+                                   headers={"User-Agent": "VEGABot/1.0"}) as resp:
                 data = await resp.json(content_type=None)
 
         embed = vega_embed(f"Recherche — {requete}")
@@ -924,60 +924,109 @@ async def qr(interaction: discord.Interaction, contenu: str):
 #  MÉMOIRE PERSISTANTE
 # ═══════════════════════════════════════════
 
-MEMORY_FILE = "vega_memory.json"
-CONVERSATION_HISTORY = {}  # user_id -> liste de messages (session courante)
+DB_FILE = "vega.db"
+CONVERSATION_HISTORY = {}  # user_id -> liste (session RAM, max 20)
 
-def load_memory() -> dict:
-    """Charge la mémoire depuis le fichier."""
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+def get_db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def save_memory(memory: dict):
-    """Sauvegarde la mémoire dans le fichier."""
-    try:
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(memory, f, ensure_ascii=False, indent=2)
-    except Exception as _e:
-        logger.warning(f"Erreur ignorée : {_e}")
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS user_memory (
+        user_id TEXT PRIMARY KEY,
+        nom TEXT,
+        nb_conversations INTEGER DEFAULT 0,
+        derniere_conversation TEXT,
+        faits TEXT DEFAULT '[]'
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS saved_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT, user_id TEXT,
+        url TEXT, titre TEXT, categorie TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    conn.commit()
+    conn.close()
+    logger.info("✅ Base de données SQLite initialisée.")
 
 def get_user_memory(user_id: int) -> dict:
-    """Récupère la mémoire d'un utilisateur."""
-    memory = load_memory()
-    return memory.get(str(user_id), {
-        "nom": None,
-        "jeux": [],
-        "sujets_favoris": [],
-        "humeur_habituelle": None,
-        "derniere_conversation": None,
-        "nb_conversations": 0,
-        "faits": []  # Faits importants mémorisés
-    })
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_memory WHERE user_id = ?", (str(user_id),))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {"nom": row["nom"], "nb_conversations": row["nb_conversations"],
+                    "derniere_conversation": row["derniere_conversation"],
+                    "faits": json.loads(row["faits"] or "[]")}
+        return {"nom": None, "nb_conversations": 0, "derniere_conversation": None, "faits": []}
+    except Exception as e:
+        logger.error(f"Erreur get_user_memory: {e}")
+        return {"nom": None, "nb_conversations": 0, "derniere_conversation": None, "faits": []}
 
 def update_user_memory(user_id: int, updates: dict):
-    """Met à jour la mémoire d'un utilisateur."""
-    memory = load_memory()
-    uid = str(user_id)
-    if uid not in memory:
-        memory[uid] = {
-            "nom": None,
-            "jeux": [],
-            "sujets_favoris": [],
-            "humeur_habituelle": None,
-            "derniere_conversation": None,
-            "nb_conversations": 0,
-            "faits": []
-        }
-    memory[uid].update(updates)
-    memory[uid]["derniere_conversation"] = datetime.now().strftime("%d/%m/%Y %H:%M")
-    memory[uid]["nb_conversations"] = memory[uid].get("nb_conversations", 0) + 1
-    save_memory(memory)
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        existing = get_user_memory(user_id)
+        existing.update(updates)
+        existing["derniere_conversation"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+        existing["nb_conversations"] = existing.get("nb_conversations", 0) + 1
+        c.execute("""INSERT INTO user_memory (user_id, nom, nb_conversations, derniere_conversation, faits)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                nom=excluded.nom, nb_conversations=excluded.nb_conversations,
+                derniere_conversation=excluded.derniere_conversation, faits=excluded.faits""",
+            (str(user_id), existing.get("nom"), existing.get("nb_conversations", 0),
+             existing.get("derniere_conversation"), json.dumps(existing.get("faits", []), ensure_ascii=False)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Erreur update_user_memory: {e}")
 
-SAVED_LINKS = {}  # guild_id -> liste de liens sauvegardés
+def load_memory() -> dict:
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_memory")
+        rows = c.fetchall()
+        conn.close()
+        return {row["user_id"]: dict(row) for row in rows}
+    except Exception as e:
+        logger.error(f"Erreur load_memory: {e}")
+        return {}
+
+def save_link(guild_id: int, user_id: int, url: str, titre: str, categorie: str):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("INSERT INTO saved_links (guild_id, user_id, url, titre, categorie) VALUES (?, ?, ?, ?, ?)",
+                  (str(guild_id), str(user_id), url, titre, categorie))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Erreur save_link: {e}")
+
+def get_links(guild_id: int, categorie: str = None) -> list:
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        if categorie:
+            c.execute("SELECT * FROM saved_links WHERE guild_id=? AND categorie=? ORDER BY created_at DESC LIMIT 20",
+                      (str(guild_id), categorie))
+        else:
+            c.execute("SELECT * FROM saved_links WHERE guild_id=? ORDER BY created_at DESC LIMIT 20", (str(guild_id),))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Erreur get_links: {e}")
+        return []
+
 
 VEGA_SYSTEM = """Tu es VEGA, l'assistant IA personnel d'un serveur Discord. Tu es l'équivalent de ChatGPT ou Claude, mais intégré directement dans Discord.
 
@@ -1006,13 +1055,13 @@ ACTIONS DISCORD (réponds UNIQUEMENT avec le JSON si action demandée) :
 Sinon, réponds normalement en français."""
 
 @bot.command(name="vega")
-async def jarvis_chat(ctx, *, question: str = None):
+async def vega_chat(ctx, *, question: str = None):
     if not question:
         embed = vega_embed(
             "VEGA",
             "Oui ? Posez votre question. Exemple : `!vega Quelle est la capitale de l'Australie ?`"
         )
-        await ctx.send(embed=embed)
+        await ctx.send("Oui ? Pose-moi une question ! Exemple : `!vega c'est quoi la gravité ?`")
         return
 
     async with ctx.typing():
@@ -1186,7 +1235,7 @@ async def role_all(interaction: discord.Interaction, role: discord.Role):
 #  COMMANDES MÉMOIRE
 # ═══════════════════════════════════════════
 
-@bot.tree.command(name="memoire", description="Affiche ce que JARVIS se souvient de toi")
+@bot.tree.command(name="memoire", description="Affiche ce que VEGA se souvient de toi")
 async def memoire(interaction: discord.Interaction):
     user_memory = get_user_memory(interaction.user.id)
     embed = discord.Embed(title=f"🧠 Mémoire — {interaction.user.display_name}", color=VEGA_COLOR)
@@ -1268,7 +1317,7 @@ async def web_search(query: str) -> str:
         try:
             url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers={"User-Agent": "JARVISBot/2.0"}, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                async with session.get(url, headers={"User-Agent": "VEGABot/1.0"}, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                     data = await resp.json(content_type=None)
             abstract = data.get("AbstractText", "")
             if abstract:
@@ -1303,13 +1352,13 @@ async def on_message(message):
     content_lower = message.content.lower().strip()
 
     # Détecte "vega" dans le message (sans préfixe !)
-    jarvis_triggers = ["vega", "hey vega", "ey vega", "vega,", "vega!", "jarvis", "hey jarvis"]
-    triggered = any(content_lower.startswith(t) for t in jarvis_triggers) or bot.user in message.mentions
+    vega_triggers = ["vega", "hey vega", "ey vega", "vega,", "vega!"]
+    triggered = any(content_lower.startswith(t) for t in vega_triggers) or bot.user in message.mentions
 
     if triggered and not content_lower.startswith("!vega"):
         # Extraire la question
         question = message.content
-        for trigger in ["vega,", "vega!", "hey vega", "ey vega", "vega", "jarvis,", "jarvis!", "hey jarvis", "ey jarvis", "jarvis"]:
+        for trigger in ["vega,", "vega!", "hey vega", "ey vega", "vega"]:
             if question.lower().startswith(trigger):
                 question = question[len(trigger):].strip()
                 break
@@ -1758,7 +1807,7 @@ def get_permissions(perm_level):
     else:
         return discord.Permissions(read_messages=True, send_messages=True, read_message_history=True, connect=True)
 
-@bot.tree.command(name="setup", description="Lance l'assistant JARVIS de création de serveur")
+@bot.tree.command(name="setup", description="Lance l'assistant VEGA de création de serveur")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
     guild = interaction.guild
@@ -1771,7 +1820,7 @@ async def setup(interaction: discord.Interaction):
     embed = discord.Embed(
         title="⚡ VEGA — Assistant Création de Serveur",
         description=(
-            "Bonjour. Je suis **JARVIS**, votre assistant personnel.\n"
+            "Bonjour. Je suis **VEGA**, votre assistant personnel.\n"
             "Je vais configurer votre serveur Discord en quelques étapes.\n\n"
             "**Étape 1/5 — Sélectionnez un template :**"
         ),
@@ -1780,7 +1829,7 @@ async def setup(interaction: discord.Interaction):
     embed.set_footer(text="VEGA • Tapez /reset pour annuler à tout moment")
     await interaction.response.send_message(embed=embed, view=TemplateSelectView(session))
 
-@bot.tree.command(name="reset", description="Annule le setup JARVIS en cours")
+@bot.tree.command(name="reset", description="Annule le setup VEGA en cours")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset_setup(interaction: discord.Interaction):
     if interaction.guild.id in sessions:
@@ -2158,7 +2207,7 @@ async def build_server(interaction, session):
 
     except discord.Forbidden:
         await interaction.edit_original_response(
-            embed=vega_embed("Permissions insuffisantes", "❌ JARVIS n'a pas les droits nécessaires. Attribuez-lui le rôle **Administrateur**.", color=0xE74C3C)
+            embed=vega_embed("Permissions insuffisantes", "❌ VEGA n'a pas les droits nécessaires. Attribuez-lui le rôle **Administrateur**.", color=0xE74C3C)
         )
         if guild.id in sessions:
             del sessions[guild.id]
@@ -2272,7 +2321,7 @@ async def play(interaction: discord.Interaction, lien: str):
             embed=vega_embed("Musique — Erreur", f"❌ Erreur : `{e}`\nAssure-toi que FFmpeg est installé.", color=0xE74C3C)
         )
 
-@bot.tree.command(name="stop", description="Arrête la musique et déconnecte JARVIS du vocal")
+@bot.tree.command(name="stop", description="Arrête la musique et déconnecte VEGA du vocal")
 async def stop(interaction: discord.Interaction):
     if interaction.guild.voice_client:
         music_queues[interaction.guild.id] = []
@@ -2450,7 +2499,7 @@ async def fetch_and_post_deals():
                     if deals:
                         embed = discord.Embed(
                             title="🎮 Bons plans du moment",
-                            description="Les meilleures réductions jeux vidéo sélectionnées par JARVIS",
+                            description="Les meilleures réductions jeux vidéo sélectionnées par VEGAIS",
                             color=0x00D4FF
                         )
                         for deal in deals[:5]:
@@ -3004,6 +3053,25 @@ async def handle_quiz_answer(message, user_id):
     
     return True
 
+
+
+@bot.tree.command(name="liens", description="Affiche les liens sauvegardés sur ce serveur")
+@app_commands.describe(categorie="Filtrer par catégorie (jeux, musique, cours, autre)")
+async def liens(interaction: discord.Interaction, categorie: str = None):
+    guild_id = interaction.guild.id if interaction.guild else 0
+    links = get_links(guild_id, categorie)
+    if not links:
+        await interaction.response.send_message("📭 Aucun lien sauvegardé" + (f" dans *{categorie}*" if categorie else "") + ". Dis à VEGA de sauvegarder un lien !", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"🔗 Liens sauvegardés{f' — {categorie}' if categorie else ''}", color=VEGA_COLOR)
+    for link in links[:10]:
+        embed.add_field(
+            name=f"📌 {link['titre']} [{link['categorie']}]",
+            value=link['url'],
+            inline=False
+        )
+    embed.set_footer(text=f"{len(links)} lien(s) trouvé(s)")
+    await interaction.response.send_message(embed=embed)
 
 # ═══════════════════════════════════════════
 #  /status — Santé du bot
