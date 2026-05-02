@@ -1,0 +1,7 @@
+discord.py
+aiohttp
+pytz
+yt-dlp
+PyNaCl
+python-dotenv
+google-search-results
